@@ -1,0 +1,16 @@
+[package]
+name = "meshcore-chat"
+version = "0.1.0"
+edition = "2021"
+description = "A TUI chat application for MeshCore mesh networking"
+
+[dependencies]
+meshcore-rs = { git = "https://github.com/andrewdavidmackenzie/meshcore-rs.git" }
+tokio = { version = "1", features = ["full"] }
+crossterm = "0.28"
+ratatui = "0.29"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.1"
