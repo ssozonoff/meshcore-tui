@@ -5,7 +5,7 @@ edition = "2021"
 description = "A TUI chat application for MeshCore mesh networking"
 
 [dependencies]
-meshcore-rs = { path = "../meshcore-rs" }
+meshcore-rs = { git = "https://github.com/andrewdavidmackenzie/meshcore-rs.git" }
 tokio = { version = "1", features = ["full"] }
 crossterm = "0.28"
 ratatui = "0.29"

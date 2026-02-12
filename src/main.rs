@@ -14,10 +14,27 @@ use meshcore_rs::events::{Contact, EventPayload, SelfInfo};
 use meshcore_rs::{EventType, MeshCore};
 use unicode_width::UnicodeWidthStr;
 
-/// Strip Unicode replacement chars and non-printable characters from mesh strings
+/// Strip Unicode replacement chars, control chars, and emoji from mesh strings.
+/// Emoji have inconsistent terminal widths that break TUI border alignment.
 fn sanitize(s: &str) -> String {
     s.chars()
-        .filter(|c| *c != '\u{FFFD}' && (*c == ' ' || !c.is_control()))
+        .filter(|c| {
+            if *c == '\u{FFFD}' || (*c != ' ' && c.is_control()) {
+                return false;
+            }
+            // Strip emoji and other wide/variable-width Unicode blocks
+            let cp = *c as u32;
+            // Keep ASCII and basic Latin/extended chars
+            if cp < 0x2600 {
+                return true;
+            }
+            // Block various emoji and symbol ranges
+            matches!(cp,
+                // Allow box drawing, block elements, etc. used by TUI
+                0x2500..=0x257F | // Box Drawing
+                0x2580..=0x259F   // Block Elements
+            )
+        })
         .collect::<String>()
         .trim()
         .to_string()
@@ -123,6 +140,8 @@ struct App {
     messages: Vec<ChatMessage>,
     contacts: Vec<Contact>,
     channels: HashMap<u8, ChannelEntry>,
+    /// Maps firmware channel_idx → local channel index for received message lookup
+    fw_channel_map: HashMap<u8, u8>,
     packets: Vec<PacketLogEntry>,
     selected_contact: Option<usize>,
     self_info: Option<SelfInfo>,
@@ -144,6 +163,7 @@ impl App {
             messages: Vec::new(),
             contacts: Vec::new(),
             channels: HashMap::new(),
+            fw_channel_map: HashMap::new(),
             packets: Vec::new(),
             selected_contact: None,
             self_info: None,
@@ -189,11 +209,22 @@ impl App {
             .unwrap_or_else(|| self.channel_label(self.active_channel))
     }
 
-    fn channel_label(&self, idx: u8) -> String {
-        match self.channels.get(&idx) {
-            Some(ch) if !ch.name.is_empty() => format!("#{} {}", idx, ch.name),
-            _ => format!("Channel #{}", idx),
+    fn channel_label(&self, ch: u8) -> String {
+        // Direct lookup by local index
+        if let Some(entry) = self.channels.get(&ch) {
+            if !entry.name.is_empty() {
+                return entry.name.clone();
+            }
         }
+        // Lookup via firmware channel_idx → local index mapping
+        if let Some(&local_idx) = self.fw_channel_map.get(&ch) {
+            if let Some(entry) = self.channels.get(&local_idx) {
+                if !entry.name.is_empty() {
+                    return entry.name.clone();
+                }
+            }
+        }
+        format!("CH#{}", ch)
     }
 
     fn resolve_sender(&self, prefix: &[u8; 6]) -> String {
@@ -202,10 +233,14 @@ impl App {
             .find(|c| &c.public_key[..6] == prefix)
             .map(|c| sanitize(&c.adv_name))
             .unwrap_or_else(|| {
-                meshcore_rs::parsing::hex_encode(prefix)
-                    .chars()
-                    .take(8)
-                    .collect()
+                let hex = meshcore_rs::parsing::hex_encode(prefix);
+                // Trim leading zeros for cleaner display
+                let trimmed = hex.trim_start_matches('0');
+                if trimmed.is_empty() {
+                    "0".into()
+                } else {
+                    trimmed.to_string()
+                }
             })
     }
 }
@@ -273,7 +308,7 @@ async fn connect(app: &Arc<Mutex<App>>, args: &Args) -> Option<MeshCore> {
         Ok(info) => {
             let mut a = app.lock().await;
             a.sys(&format!("Connected: {} (freq: {} MHz, SF{}, CR{}, BW {} kHz)",
-                info.name,
+                sanitize(&info.name),
                 info.radio_freq as f64 / 1_000_000.0,
                 info.sf,
                 info.cr,
@@ -312,7 +347,7 @@ async fn connect(app: &Arc<Mutex<App>>, args: &Args) -> Option<MeshCore> {
     if let Ok(bat) = mc.commands().lock().await.get_bat().await {
         let mut a = app.lock().await;
         a.battery_level = Some(bat.level);
-        a.sys(&format!("Battery: {}%", bat.level));
+        a.sys(&format!("Battery: {:.3}V", bat.level as f64 / 1000.0));
     }
 
     // Contacts (BLE needs longer timeout)
@@ -334,26 +369,31 @@ async fn connect(app: &Arc<Mutex<App>>, args: &Args) -> Option<MeshCore> {
         }
     }
 
-    // Load channels (try indices 0-7)
+    // Load channels sequentially
     {
         let mut loaded = 0u8;
-        for idx in 0..8u8 {
+        let mut names = Vec::new();
+        for idx in 0..16u8 {
             match mc.commands().lock().await.get_channel(idx).await {
                 Ok(info) => {
                     let name = sanitize(&info.name);
                     if !name.is_empty() {
-                        app.lock().await.channels.insert(idx, ChannelEntry {
-                            name,
+                        let mut a = app.lock().await;
+                        a.channels.insert(idx, ChannelEntry {
+                            name: name.clone(),
                             secret: info.secret,
                         });
+                        a.fw_channel_map.insert(info.channel_idx, idx);
+                        names.push(name);
+                        drop(a);
                         loaded += 1;
                     }
                 }
-                Err(_) => break, // No more channels
+                Err(_) => continue,
             }
         }
         if loaded > 0 {
-            app.lock().await.sys(&format!("Loaded {} channels", loaded));
+            app.lock().await.sys(&format!("Loaded {} channels: {}", loaded, names.join(", ")));
         }
     }
 
@@ -594,7 +634,7 @@ async fn handle_command(cmd: &str, app: &Arc<Mutex<App>>, mc: Option<&MeshCore>)
                 for idx in indices {
                     if let Some(ch) = a.channels.get(&idx) {
                         let secret_hex = meshcore_rs::parsing::hex_encode(&ch.secret);
-                        let active = if idx == a.active_channel { " ◀" } else { "" };
+                        let active = if idx == a.active_channel { " \u{25c0}" } else { "" };
                         lines_out.push(format!(
                             "  #{}: {} [{}]{}",
                             idx, ch.name, secret_hex, active
@@ -669,7 +709,7 @@ async fn handle_command(cmd: &str, app: &Arc<Mutex<App>>, mc: Option<&MeshCore>)
                     Ok(b) => {
                         let mut a = app.lock().await;
                         a.battery_level = Some(b.level);
-                        a.sys(&format!("Battery: {}%  Storage: {}", b.level, b.storage));
+                        a.sys(&format!("Battery: {:.3}V  Storage: {}", b.level as f64 / 1000.0, b.storage));
                     }
                     Err(e) => app.lock().await.err(&format!("Battery: {}", e)),
                 }
@@ -690,14 +730,14 @@ async fn handle_command(cmd: &str, app: &Arc<Mutex<App>>, mc: Option<&MeshCore>)
             if let Some(ref info) = a.self_info {
                 let lines = format!(
                     "Device: {} | Key: {} | Freq: {:.3} MHz | SF{} CR{} BW {:.1}kHz | TX: {}dBm | Bat: {}",
-                    info.name,
+                    sanitize(&info.name),
                     meshcore_rs::parsing::hex_encode(&info.public_key[..6]),
                     info.radio_freq as f64 / 1e6,
                     info.sf,
                     info.cr,
                     info.radio_bw as f64 / 1e3,
                     info.tx_power,
-                    a.battery_level.map(|b| format!("{}%", b)).unwrap_or("N/A".into()),
+                    a.battery_level.map(|b| format!("{:.3}V", b as f64 / 1000.0)).unwrap_or("N/A".into()),
                 );
                 drop(a);
                 app.lock().await.sys(&lines);
@@ -780,10 +820,11 @@ async fn handle_command(cmd: &str, app: &Arc<Mutex<App>>, mc: Option<&MeshCore>)
                                 name: name.clone(),
                                 secret: info.secret,
                             });
+                            a.fw_channel_map.insert(info.channel_idx, idx);
                         }
                         a.sys(&format!(
-                            "Channel #{}: name='{}' secret={}",
-                            info.channel_idx, name, secret_hex
+                            "Channel #{} (fw#{}): name='{}' secret={}",
+                            idx, info.channel_idx, name, secret_hex
                         ));
                     }
                     Err(e) => app.lock().await.err(&format!("Get channel: {}", e)),
@@ -873,7 +914,6 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .messages
         .iter()
-        .rev()
         .map(|m| {
             let (tag, tag_c, name_c) = match &m.msg_type {
                 MsgType::Incoming => ("[MSG]".to_string(), Color::Cyan, Color::Cyan),
@@ -1005,29 +1045,24 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(Color::White)
             };
-            let marker = if sel { "▶ " } else { "  " };
             let name = sanitize(&c.adv_name);
             let hex = c.prefix_hex();
-            let suffix = format!(" ({})", &hex[..8.min(hex.len())]);
-            let suffix_w = suffix.width();
-            let marker_w = marker.width();
+            let hex_short = &hex[..8.min(hex.len())];
 
-            // Truncate name if it doesn't fit
-            let max_name_w = cpanel_width.saturating_sub(marker_w + suffix_w);
-            let display_name = truncate_to_width(&name, max_name_w);
+            // Build the full line and truncate to exactly cpanel_width
+            let marker = if sel { "\u{25b6} " } else { "  " };
+            let full = format!("{}{} ({})", marker, name, hex_short);
+            let line = truncate_to_width(&full, cpanel_width);
 
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, sty),
-                Span::styled(display_name, sty),
-                Span::styled(
-                    suffix,
-                    if sel {
-                        sty
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
-            ]))
+            // Pad with spaces to fill the panel (needed for selection highlight)
+            let line_w = UnicodeWidthStr::width(line.as_str());
+            let padded = if line_w < cpanel_width {
+                format!("{}{}", line, " ".repeat(cpanel_width - line_w))
+            } else {
+                line
+            };
+
+            ListItem::new(Span::styled(padded, sty))
         })
         .collect();
 
@@ -1111,7 +1146,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(
-                    " Send to: {} (Enter=send, Tab=panel, ↑↓=contact, F1=channel, Esc=quit) ",
+                    " Send to: {} (Enter=send, Tab=panel, ↑↓=contact, F1=deselect, Esc=quit) ",
                     app.target_label()
                 ))
                 .border_style(Style::default().fg(Color::Cyan)),
