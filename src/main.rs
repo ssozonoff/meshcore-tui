@@ -450,7 +450,7 @@ async fn setup_subscriptions(mc: &MeshCore, app: Arc<Mutex<App>>) {
         .await;
     }
 
-    // Advertisements
+    // Advertisements (0x80)
     {
         let app = app.clone();
         mc.subscribe(
@@ -477,6 +477,45 @@ async fn setup_subscriptions(mc: &MeshCore, app: Arc<Mutex<App>>) {
                         if a.packets.len() > 100 {
                             a.packets.remove(0);
                         }
+                    });
+                }
+            },
+        )
+        .await;
+    }
+
+    // New contacts / adverts (0x8A PushCodeNewAdvert)
+    {
+        let app = app.clone();
+        mc.subscribe(
+            EventType::NewContact,
+            HashMap::new(),
+            move |event| {
+                if let EventPayload::Contact(contact) = event.payload {
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        let mut a = app.lock().await;
+                        let name = sanitize(&contact.adv_name);
+                        a.packets.push(PacketLogEntry {
+                            timestamp: now(),
+                            ptype: "ADV".into(),
+                            hops: contact.path_len.max(0) as u8,
+                            rssi: 0,
+                            snr: 0.0,
+                            info: format!(
+                                "{} [{}] @{:.4},{:.4}",
+                                name,
+                                contact.prefix_hex(),
+                                contact.latitude(),
+                                contact.longitude(),
+                            ),
+                        });
+                        if a.packets.len() > 100 {
+                            a.packets.remove(0);
+                        }
+                        // Update contact list
+                        a.contacts.retain(|c| c.prefix() != contact.prefix());
+                        a.contacts.push(contact);
                     });
                 }
             },
