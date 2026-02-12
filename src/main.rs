@@ -309,7 +309,7 @@ async fn connect(app: &Arc<Mutex<App>>, args: &Args) -> Option<MeshCore> {
             let mut a = app.lock().await;
             a.sys(&format!("Connected: {} (freq: {} MHz, SF{}, CR{}, BW {} kHz)",
                 sanitize(&info.name),
-                info.radio_freq as f64 / 1_000_000.0,
+                info.radio_freq as f64 / 1_000.0,
                 info.sf,
                 info.cr,
                 info.radio_bw as f64 / 1_000.0,
@@ -732,7 +732,7 @@ async fn handle_command(cmd: &str, app: &Arc<Mutex<App>>, mc: Option<&MeshCore>)
                     "Device: {} | Key: {} | Freq: {:.3} MHz | SF{} CR{} BW {:.1}kHz | TX: {}dBm | Bat: {}",
                     sanitize(&info.name),
                     meshcore_rs::parsing::hex_encode(&info.public_key[..6]),
-                    info.radio_freq as f64 / 1e6,
+                    info.radio_freq as f64 / 1e3,
                     info.sf,
                     info.cr,
                     info.radio_bw as f64 / 1e3,
@@ -862,7 +862,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         .map(|i| {
             format!(
                 "{:.3} MHz | BW: {:.1} kHz | SF: {} | CR: {}",
-                i.radio_freq as f64 / 1e6,
+                i.radio_freq as f64 / 1e3,
                 i.radio_bw as f64 / 1e3,
                 i.sf,
                 i.cr
