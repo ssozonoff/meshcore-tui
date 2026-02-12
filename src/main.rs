@@ -417,6 +417,8 @@ async fn setup_subscriptions(mc: &MeshCore, app: Arc<Mutex<App>>) {
                         text: sanitize(&msg.text),
                         msg_type: MsgType::Incoming,
                     });
+                    // Bell on new message
+                    print!("\x07");
                 });
             }
         })
@@ -443,6 +445,8 @@ async fn setup_subscriptions(mc: &MeshCore, app: Arc<Mutex<App>>) {
                             text: sanitize(&msg.text),
                             msg_type: MsgType::Channel(ch),
                         });
+                        // Bell on new message
+                        print!("\x07");
                     });
                 }
             },
